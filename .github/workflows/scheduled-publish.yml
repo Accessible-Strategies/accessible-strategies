@@ -1,0 +1,15 @@
+name: Publish Scheduled Posts
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call publish-scheduled endpoint
+        run: |
+          curl -f -X GET "https://accessiblestrategies.com/api/cron/publish-scheduled" \
+            -H "Authorization: Bearer ${{ secrets.SCHEDULER_SECRET }}"
