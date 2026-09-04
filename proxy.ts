@@ -8,22 +8,15 @@ import type { NextRequest } from 'next/server';
  * Next.js 16 renamed middleware.ts -> proxy.ts, and only one is allowed,
  * so both concerns live in this single function now.
  *
- * 1. Admin auth (unchanged from before): "/admin/login" is always allowed
- *    through; any other "/admin/*" route requires a valid NextAuth token,
- *    redirecting to the login page otherwise.
- * 2. Coming-soon gate (new): while the public site isn't launched yet,
- *    every route that ISN'T "/", "/admin/*", "/api/*", or a standard
- *    static/root file redirects back to "/" (the splash page). Remove
- *    this block once the real site is ready to launch.
+ * 1. Admin auth (unchanged from the original file): "/admin/login" is
+ *    always allowed through; any other "/admin/*" route requires a valid
+ *    NextAuth token, redirecting to the login page otherwise.
+ * 2. Coming-soon gate: while the public site isn't launched yet, every
+ *    route that ISN'T "/", "/admin/*", "/api/*", or a static file (image,
+ *    icon, css, etc. served from /public) redirects back to "/" (the
+ *    splash page). Remove this block once the real site is ready to
+ *    launch.
  */
-const ALLOWED_EXACT = new Set([
-  '/',
-  '/favicon.ico',
-  '/robots.txt',
-  '/sitemap.xml',
-  '/manifest.json',
-]);
-
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -46,7 +39,13 @@ export async function proxy(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (ALLOWED_EXACT.has(pathname)) {
+  // Let any static file in /public through (logo, favicon, images, etc.)
+  // rather than trying to allowlist every filename individually.
+  if (/\.[a-zA-Z0-9]+$/.test(pathname)) {
+    return NextResponse.next();
+  }
+
+  if (pathname === '/') {
     return NextResponse.next();
   }
 
@@ -56,9 +55,9 @@ export async function proxy(req: NextRequest) {
 }
 
 // Runs on every route except Next.js's own static/image asset paths -
-// admin, api, and coming-soon exemptions are all handled inside the
-// function above rather than the matcher, since matcher patterns can't
-// express "these exact files" as cleanly as a Set check can.
+// admin, api, static-file, and coming-soon exemptions are all handled
+// inside the function above rather than the matcher, since matcher
+// patterns can't express file-extension checks as cleanly as a regex can.
 export const config = {
   matcher: ['/((?!_next/static|_next/image).*)'],
 };
