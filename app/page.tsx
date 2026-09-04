@@ -38,7 +38,7 @@ export default function ComingSoonPage() {
           </p>
 
           <p>
-            The site isn&rsquo;t quite ready yet. I&rsquo;m hoping to launch it by <strong>November 2nd</strong>,
+            The site isn&rsquo;t finished yet. I&rsquo;m hoping to launch it by <strong>November 2nd</strong>,
             so please check back then.
           </p>
 
