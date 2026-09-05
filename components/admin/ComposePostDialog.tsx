@@ -17,6 +17,10 @@ interface ExistingPost {
 
 interface ComposePostDialogProps {
   post?: ExistingPost | null;
+  // Only used when creating a NEW post (post is null/undefined) - lets the
+  // calendar pre-fill the schedule field when you click a specific day,
+  // without affecting the "editing an existing post" logic at all.
+  initialScheduledAt?: Date | string | null;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -33,10 +37,12 @@ function toDateTimeLocal(value: string | Date | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export default function ComposePostDialog({ post, onClose, onSaved }: ComposePostDialogProps) {
+export default function ComposePostDialog({ post, initialScheduledAt, onClose, onSaved }: ComposePostDialogProps) {
   const isEditing = !!post;
   const [content, setContent] = useState(post?.content ?? '');
-  const [scheduledAt, setScheduledAt] = useState(toDateTimeLocal(post?.scheduledAt ?? null));
+  const [scheduledAt, setScheduledAt] = useState(
+    toDateTimeLocal(post?.scheduledAt ?? initialScheduledAt ?? null)
+  );
   const [platforms, setPlatforms] = useState<Set<Platform>>(
     new Set((post?.targets?.map(t => t.platform) ?? []) as Platform[])
   );
@@ -196,7 +202,7 @@ export default function ComposePostDialog({ post, onClose, onSaved }: ComposePos
       {confirmingDelete && (
         <ConfirmDialog
           title="Delete Post?"
-          message={'This can\u2019t be undone.'}
+          message={'This can’t be undone.'}
           onConfirm={handleDelete}
           onCancel={() => setConfirmingDelete(false)}
         />
@@ -205,7 +211,7 @@ export default function ComposePostDialog({ post, onClose, onSaved }: ComposePos
       {confirmingPublish && (
         <ConfirmDialog
           title="Publish Now?"
-          message={'This will post immediately to the selected platforms, regardless of the scheduled date. This can\u2019t be undone.'}
+          message={'This will post immediately to the selected platforms, regardless of the scheduled date. This can’t be undone.'}
           confirmLabel="Publish"
           onConfirm={handlePublishNow}
           onCancel={() => setConfirmingPublish(false)}

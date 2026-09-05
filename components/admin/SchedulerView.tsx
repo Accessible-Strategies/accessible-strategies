@@ -6,6 +6,7 @@ import ComposePostDialog from '@/components/admin/ComposePostDialog';
 import { BlueskyIcon, MastodonIcon } from '@/components/icons/Icons';
 
 type ViewMode = 'kanban' | 'calendar';
+type CalendarScale = 'month' | 'week' | 'day';
 
 const COLUMNS = [
   { key: 'draft',     label: 'Draft'     },
@@ -28,12 +29,29 @@ function formatScheduled(value: string | Date | null): string | null {
   if (!value) return null;
   const d = new Date(value);
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-    + ' \u2022 '
+    + ' • '
     + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
 function sameDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function startOfWeek(date: Date): Date {
+  return addDays(date, -date.getDay());
+}
+
+// Day cells only carry a date, not a time - default new posts created by
+// clicking a day to 9:00 AM so there's a sensible starting point to adjust
+// in the compose dialog rather than defaulting to midnight.
+function atDefaultTime(date: Date): Date {
+  const d = new Date(date);
+  d.setHours(9, 0, 0, 0);
+  return d;
 }
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -42,11 +60,13 @@ export default function SchedulerView() {
   const [posts, setPosts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<ViewMode>('kanban');
+  const [calendarScale, setCalendarScale] = useState<CalendarScale>('month');
   const [composeOpen, setComposeOpen] = useState(false);
   const [editingPost, setEditingPost] = useState<any | null>(null);
-  const [monthCursor, setMonthCursor] = useState(() => {
+  const [newPostDate, setNewPostDate] = useState<Date | null>(null);
+  const [focusDate, setFocusDate] = useState(() => {
     const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
   });
   const [keyword, setKeyword] = useState('');
   const [filterPlatforms, setFilterPlatforms] = useState<Set<string>>(new Set());
@@ -85,35 +105,48 @@ export default function SchedulerView() {
     });
   }
 
-  function openNew() {
+  // date is optional - passed when creating a post from a clicked calendar
+  // day, omitted when creating via the top "+ New Post" button.
+  function openNew(date?: Date) {
     setEditingPost(null);
+    setNewPostDate(date ? atDefaultTime(date) : null);
     setComposeOpen(true);
   }
 
   function openEdit(post: any) {
     setEditingPost(post);
+    setNewPostDate(null);
     setComposeOpen(true);
   }
 
   function handleSaved() {
     setComposeOpen(false);
     setEditingPost(null);
+    setNewPostDate(null);
     refresh();
   }
 
+  // Days shown in the grid, based on the current scale:
+  //  - month: the classic 6-week (42 day) grid anchored on focusDate's month
+  //  - week:  7 days starting the Sunday of focusDate's week
+  //  - day:   just focusDate itself
   const calendarDays = useMemo(() => {
-    const year  = monthCursor.getFullYear();
-    const month = monthCursor.getMonth();
-    const firstOfMonth = new Date(year, month, 1);
-    const startOffset  = firstOfMonth.getDay();
-    const gridStart     = new Date(year, month, 1 - startOffset);
-
-    const days: Date[] = [];
-    for (let i = 0; i < 42; i++) {
-      days.push(new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i));
+    if (calendarScale === 'day') {
+      return [focusDate];
     }
-    return days;
-  }, [monthCursor]);
+
+    if (calendarScale === 'week') {
+      const start = startOfWeek(focusDate);
+      return Array.from({ length: 7 }, (_, i) => addDays(start, i));
+    }
+
+    // month
+    const year  = focusDate.getFullYear();
+    const month = focusDate.getMonth();
+    const firstOfMonth = new Date(year, month, 1);
+    const gridStart = addDays(firstOfMonth, -firstOfMonth.getDay());
+    return Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
+  }, [focusDate, calendarScale]);
 
   const calendarPosts = useMemo(
     () => filteredPosts.filter(p => (p.status === 'scheduled' || p.status === 'posted') && p.scheduledAt),
@@ -124,9 +157,28 @@ export default function SchedulerView() {
     return calendarPosts.filter(p => sameDay(new Date(p.scheduledAt), day));
   }
 
-  function changeMonth(delta: number) {
-    setMonthCursor(prev => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+  function changePeriod(delta: number) {
+    setFocusDate(prev => {
+      if (calendarScale === 'day') return addDays(prev, delta);
+      if (calendarScale === 'week') return addDays(prev, delta * 7);
+      return new Date(prev.getFullYear(), prev.getMonth() + delta, 1);
+    });
   }
+
+  const periodLabel = useMemo(() => {
+    if (calendarScale === 'day') {
+      return focusDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    }
+    if (calendarScale === 'week') {
+      const start = startOfWeek(focusDate);
+      const end = addDays(start, 6);
+      const sameMonth = start.getMonth() === end.getMonth();
+      const startLabel = start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const endLabel = end.toLocaleDateString(undefined, sameMonth ? { day: 'numeric' } : { month: 'short', day: 'numeric' });
+      return `${startLabel} – ${endLabel}, ${end.getFullYear()}`;
+    }
+    return focusDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  }, [focusDate, calendarScale]);
 
   return (
     <>
@@ -139,7 +191,7 @@ export default function SchedulerView() {
             </label>
           ))}
         </div>
-        <button className="btn btn--primary" onClick={openNew}>+ New Post</button>
+        <button className="btn btn--primary" onClick={() => openNew()}>+ New Post</button>
       </div>
 
       <div className="scheduler-filter-bar">
@@ -230,52 +282,124 @@ export default function SchedulerView() {
       ) : (
         <div className="scheduler-calendar">
           <div className="scheduler-calendar__nav">
-            <button className="icon-hover" onClick={() => changeMonth(-1)} aria-label="Previous month">‹</button>
-            <span className="scheduler-calendar__month-label">
-              {monthCursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
-            </span>
-            <button className="icon-hover" onClick={() => changeMonth(1)} aria-label="Next month">›</button>
+            <button className="icon-hover" onClick={() => changePeriod(-1)} aria-label="Previous">‹</button>
+            <span className="scheduler-calendar__month-label">{periodLabel}</span>
+            <button className="icon-hover" onClick={() => changePeriod(1)} aria-label="Next">›</button>
           </div>
 
-          <div className="scheduler-calendar__grid">
-            {WEEKDAYS.map(w => (
-              <div key={w} className="scheduler-calendar__weekday">{w}</div>
+          <div className="reason-list reason-list--compact" role="radiogroup" aria-label="Calendar scale" style={{ justifyContent: 'center', marginBottom: 'var(--as-gap)' }}>
+            {(['month', 'week', 'day'] as CalendarScale[]).map(scale => (
+              <label key={scale} className={`reason-option reason-option--compact${calendarScale === scale ? ' reason-option--active' : ''}`}>
+                <input
+                  type="radio"
+                  name="calendar-scale"
+                  checked={calendarScale === scale}
+                  onChange={() => setCalendarScale(scale)}
+                  className="sr-only"
+                />
+                <span className="reason-option__label">
+                  {scale === 'month' ? 'Month' : scale === 'week' ? 'Week' : 'Day'}
+                </span>
+              </label>
             ))}
-            {calendarDays.map((day, i) => {
-              const inMonth = day.getMonth() === monthCursor.getMonth();
-              const dayPosts = postsForDay(day);
-              return (
-                <div key={i} className={`scheduler-calendar__day${inMonth ? '' : ' scheduler-calendar__day--outside'}`}>
-                  <span className="scheduler-calendar__day-number">{day.getDate()}</span>
-                  {dayPosts.map(post => (
-                    <button
-                      key={post.id}
-                      className="scheduler-calendar__post"
-                      onClick={() => openEdit(post)}
-                      title={post.content}
-                    >
-                      <span className="scheduler-calendar__post-platforms">
-                        {post.targets?.map((t: any) => {
-                          const Icon = PLATFORM_ICON[t.platform];
-                          return Icon ? <Icon key={t.platform} size={11} /> : null;
-                        })}
-                      </span>
-                      {new Date(post.scheduledAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
-                      {' \u2022 '}
-                      {post.content}
-                    </button>
-                  ))}
-                </div>
-              );
-            })}
           </div>
+
+          {calendarScale === 'day' ? (
+            <div className="kanban-column" style={{ minHeight: 'auto' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
+                <button className="btn btn--ghost" onClick={() => openNew(focusDate)}>
+                  + New Post for This Day
+                </button>
+              </div>
+              <div className="kanban-column__cards">
+                {postsForDay(focusDate).length === 0 ? (
+                  <p style={{ fontSize: 'var(--as-text-sm)', color: 'var(--as-text-muted)', padding: '12px 4px' }}>
+                    No posts scheduled for this day.
+                  </p>
+                ) : (
+                  postsForDay(focusDate)
+                    .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
+                    .map(post => {
+                      const time = new Date(post.scheduledAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+                      return (
+                        <button key={post.id} className="kanban-card" onClick={() => openEdit(post)}>
+                          <p className="kanban-card__content" style={{ WebkitLineClamp: 'unset' }}>{post.content}</p>
+                          <div className="kanban-card__footer">
+                            <div className="kanban-card__platforms">
+                              {post.targets?.map((t: any) => (
+                                <span key={t.platform} className="kanban-card__platform-badge">
+                                  {PLATFORM_LABEL[t.platform] ?? t.platform}
+                                </span>
+                              ))}
+                            </div>
+                            <span className="kanban-card__time">{time}</span>
+                          </div>
+                        </button>
+                      );
+                    })
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="scheduler-calendar__grid">
+              {WEEKDAYS.map(w => (
+                <div key={w} className="scheduler-calendar__weekday">{w}</div>
+              ))}
+              {calendarDays.map((day, i) => {
+                const inMonth = calendarScale === 'week' || day.getMonth() === focusDate.getMonth();
+                const dayPosts = postsForDay(day);
+                const dayLabel = day.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+                return (
+                  <div
+                    key={i}
+                    className={`scheduler-calendar__day${inMonth ? '' : ' scheduler-calendar__day--outside'}`}
+                    style={{
+                      cursor: 'pointer',
+                      ...(calendarScale === 'week' ? { minHeight: '160px' } : {}),
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Add post on ${dayLabel}`}
+                    onClick={() => openNew(day)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        openNew(day);
+                      }
+                    }}
+                  >
+                    <span className="scheduler-calendar__day-number">{day.getDate()}</span>
+                    {dayPosts.map(post => (
+                      <button
+                        key={post.id}
+                        className="scheduler-calendar__post"
+                        onClick={e => { e.stopPropagation(); openEdit(post); }}
+                        title={post.content}
+                      >
+                        <span className="scheduler-calendar__post-platforms">
+                          {post.targets?.map((t: any) => {
+                            const Icon = PLATFORM_ICON[t.platform];
+                            return Icon ? <Icon key={t.platform} size={11} /> : null;
+                          })}
+                        </span>
+                        {new Date(post.scheduledAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                        {' • '}
+                        {post.content}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
       {composeOpen && (
         <ComposePostDialog
           post={editingPost}
-          onClose={() => { setComposeOpen(false); setEditingPost(null); }}
+          initialScheduledAt={newPostDate}
+          onClose={() => { setComposeOpen(false); setEditingPost(null); setNewPostDate(null); }}
           onSaved={handleSaved}
         />
       )}

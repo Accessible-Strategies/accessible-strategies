@@ -1310,9 +1310,10 @@ small     { font-size: var(--as-text-sm); }
 
 .kanban-card__footer {
   display:         flex;
-  align-items:     center;
+  align-items:     flex-start;
   justify-content: space-between;
-  gap:             8px;
+  flex-wrap:       wrap;
+  gap:             4px 8px;
 }
 
 .kanban-card__platforms {
@@ -1380,6 +1381,7 @@ small     { font-size: var(--as-text-sm); }
 .scheduler-calendar__day {
   background-color: var(--as-bg-main);
   min-height:       100px;
+  min-width:        0;
   padding:          6px;
   display:          flex;
   flex-direction:   column;
