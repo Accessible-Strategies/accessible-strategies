@@ -1,10 +1,15 @@
-import { pgTable, serial, text, timestamp, varchar, boolean, integer } from 'drizzle-orm/pg-core';
+import { pgTable, serial, text, timestamp, varchar, boolean, integer, jsonb } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
 // A single composed post — one row regardless of how many platforms it targets
 export const posts = pgTable('posts', {
   id:           serial('id').primaryKey(),
   content:      text('content').notNull(),
+  // Additional posts in a thread, beyond the first (which stays in
+  // `content` above). Each part gets posted as a reply to the one
+  // before it — see postThreadToBluesky/postThreadToMastodon. Null or
+  // an empty array means this is just a regular single post.
+  threadParts:  jsonb('thread_parts').$type<string[]>(),
   scheduledAt:  timestamp('scheduled_at', { withTimezone: true }),
   status:       varchar('status', { length: 20 }).notNull().default('draft'), // draft | scheduled | posted | failed
   createdAt:    timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

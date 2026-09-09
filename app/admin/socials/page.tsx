@@ -1,10 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import SchedulerView from '@/components/admin/SchedulerView';
 import PlatformFeedView from '@/components/admin/PlatformFeedView';
+import BlueskySearch from '@/components/admin/BlueskySearch';
 import {
   getBlueskyFollowing,
+  getBlueskySavedFeeds,
+  getBlueskyCustomFeed,
   getMastodonFollowing,
   likeBluesky,
   unlikeBluesky,
@@ -19,6 +22,11 @@ import {
 } from '@/lib/actions/feeds';
 
 type Section = 'scheduler' | 'bluesky' | 'mastodon';
+
+interface SavedFeed {
+  uri: string;
+  displayName: string;
+}
 
 const blueskyActions = {
   like: likeBluesky,
@@ -48,8 +56,33 @@ const mastodonSaveActions = {
   listSavedIds: () => listSavedPostIds('mastodon'),
 };
 
+// Narrower, centered column for the actual post feed — keeps long lines
+// of post text readable and matches how Bluesky/Mastodon's own feeds are
+// laid out, while the search bar and tab rows above stay full width.
+const feedColumnStyle = { width: '75%', margin: '0 auto' } as const;
+
 export default function Socials() {
   const [section, setSection] = useState<Section>('scheduler');
+  const [feeds, setFeeds] = useState<SavedFeed[]>([{ uri: 'following', displayName: 'Following' }]);
+  const [activeFeedUri, setActiveFeedUri] = useState('following');
+
+  // Pulled live from Bluesky's own account preferences — whatever you've
+  // pinned there (via the app's "More feeds" screen) shows up here as a
+  // tab automatically, in the same order. Nothing about feed choice is
+  // stored in our own database.
+  useEffect(() => {
+    getBlueskySavedFeeds().then(result => {
+      if (result.length > 0) {
+        setFeeds(result);
+        setActiveFeedUri(prev => (result.some(f => f.uri === prev) ? prev : result[0].uri));
+      }
+    });
+  }, []);
+
+  const activeFeed = feeds.find(f => f.uri === activeFeedUri);
+  const fetchActiveBlueskyFeed = activeFeedUri === 'following'
+    ? getBlueskyFollowing
+    : (cursor?: string) => getBlueskyCustomFeed(activeFeedUri, cursor);
 
   return (
     <section className="container admin-content">
@@ -68,20 +101,57 @@ export default function Socials() {
       </div>
 
       {section === 'scheduler' && <SchedulerView />}
+
       {section === 'bluesky' && (
-        <PlatformFeedView
-          platformLabel="Bluesky"
-          fetchFeed={getBlueskyFollowing}
-          actions={blueskyActions}
-          saveActions={blueskySaveActions}
-        />
+        <>
+          <BlueskySearch actions={blueskyActions} saveActions={blueskySaveActions} />
+
+          {feeds.length > 1 && (
+            <div
+              className="reason-list reason-list--compact"
+              role="radiogroup"
+              aria-label="Bluesky feed"
+              style={{ marginBottom: 'var(--as-gap)' }}
+            >
+              {feeds.map(feed => (
+                <label
+                  key={feed.uri}
+                  className={`reason-option reason-option--compact${activeFeedUri === feed.uri ? ' reason-option--active' : ''}`}
+                >
+                  <input
+                    type="radio"
+                    name="bluesky-feed"
+                    checked={activeFeedUri === feed.uri}
+                    onChange={() => setActiveFeedUri(feed.uri)}
+                    className="sr-only"
+                  />
+                  <span className="reason-option__label">{feed.displayName}</span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          <div style={feedColumnStyle}>
+            <PlatformFeedView
+              key={activeFeedUri}
+              platformLabel="Bluesky"
+              feedName={activeFeed?.displayName}
+              fetchFeed={fetchActiveBlueskyFeed}
+              actions={blueskyActions}
+              saveActions={blueskySaveActions}
+            />
+          </div>
+        </>
       )}
+
       {section === 'mastodon' && (
-        <PlatformFeedView
-          platformLabel="Mastodon"
-          fetchFeed={getMastodonFollowing}
-          saveActions={mastodonSaveActions}
-        />
+        <div style={feedColumnStyle}>
+          <PlatformFeedView
+            platformLabel="Mastodon"
+            fetchFeed={getMastodonFollowing}
+            saveActions={mastodonSaveActions}
+          />
+        </div>
       )}
     </section>
   );

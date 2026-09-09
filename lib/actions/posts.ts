@@ -6,11 +6,13 @@ import { eq } from 'drizzle-orm';
 
 export async function createPost(data: {
   content: string;
+  threadParts?: string[];
   scheduledAt?: Date;
   platforms: ('bluesky' | 'mastodon')[];
 }) {
   const [post] = await db.insert(posts).values({
     content: data.content,
+    threadParts: data.threadParts && data.threadParts.length > 0 ? data.threadParts : null,
     scheduledAt: data.scheduledAt,
     status: data.scheduledAt ? 'scheduled' : 'draft',
   }).returning();
@@ -40,19 +42,22 @@ export async function updatePost(id: number, data: { content?: string; scheduled
 }
 
 /**
- * Updates a post's content/schedule AND its platform targets in one call.
- * Targets are replaced wholesale (delete all, re-insert selection) rather
- * than diffed — simple and safe since nothing has actually been posted
- * yet at this stage (no per-target status/history to preserve).
+ * Updates a post's content/schedule/thread AND its platform targets in
+ * one call. Targets are replaced wholesale (delete all, re-insert
+ * selection) rather than diffed — simple and safe since nothing has
+ * actually been posted yet at this stage (no per-target status/history
+ * to preserve).
  */
 export async function updatePostWithTargets(id: number, data: {
   content: string;
+  threadParts?: string[];
   scheduledAt?: Date;
   platforms: ('bluesky' | 'mastodon')[];
 }) {
   const [updated] = await db.update(posts)
     .set({
       content: data.content,
+      threadParts: data.threadParts && data.threadParts.length > 0 ? data.threadParts : null,
       scheduledAt: data.scheduledAt,
       status: data.scheduledAt ? 'scheduled' : 'draft',
       updatedAt: new Date(),
@@ -77,13 +82,17 @@ export async function deletePost(id: number) {
 
 /**
  * Publishes a post to all its target platforms right now, regardless of
- * scheduledAt. Used for manual testing before Cron automation exists.
+ * scheduledAt. Used for manual testing before Cron automation exists,
+ * and as the actual publish step the cron route calls for due posts.
  * Updates each target's status/platformPostId/postedAt/errorMessage, then
  * sets the parent post's status based on the aggregate outcome.
+ *
+ * If the post has threadParts, posts a whole thread (content followed by
+ * each part, each replying to the previous) instead of a single post.
  */
 export async function publishPostNow(postId: number) {
-  const { postToBluesky }  = await import('@/lib/connectors/bluesky');
-  const { postToMastodon } = await import('@/lib/connectors/mastodon');
+  const { postToBluesky, postThreadToBluesky }   = await import('@/lib/connectors/bluesky');
+  const { postToMastodon, postThreadToMastodon } = await import('@/lib/connectors/mastodon');
 
   const post = await db.query.posts.findFirst({
     where: eq(posts.id, postId),
@@ -92,15 +101,19 @@ export async function publishPostNow(postId: number) {
 
   if (!post) throw new Error('Post not found');
 
+  const threadParts = (post.threadParts as string[] | null) ?? [];
+  const isThread = threadParts.length > 0;
+  const allParts = [post.content, ...threadParts];
+
   let anyFailed = false;
 
   for (const target of post.targets) {
     let result: { success: boolean; postUrl?: string; error?: string };
 
     if (target.platform === 'bluesky') {
-      result = await postToBluesky(post.content);
+      result = isThread ? await postThreadToBluesky(allParts) : await postToBluesky(post.content);
     } else if (target.platform === 'mastodon') {
-      result = await postToMastodon(post.content);
+      result = isThread ? await postThreadToMastodon(allParts) : await postToMastodon(post.content);
     } else {
       result = { success: false, error: `Unknown platform: ${target.platform}` };
     }

@@ -19,7 +19,6 @@ export async function postToBluesky(content: string): Promise<{ success: boolean
       createdAt: new Date().toISOString(),
     });
 
-    // Build a human-viewable URL from the returned AT URI
     const rkey = result.uri.split('/').pop();
     const handle = process.env.BLUESKY_IDENTIFIER!.replace('@', '');
     const postUrl = `https://bsky.app/profile/${handle}/post/${rkey}`;
@@ -27,6 +26,59 @@ export async function postToBluesky(content: string): Promise<{ success: boolean
     return { success: true, postUrl };
   } catch (err) {
     console.error('Bluesky post failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+/**
+ * Posts a thread — an ordered list of texts, each posted as a reply to
+ * the previous one, so they render as one connected conversation rather
+ * than separate unrelated posts. parts[0] becomes the root; every
+ * following part replies to the one right before it, while still
+ * pointing back at the same root (required by the AT Protocol — a reply
+ * needs both its immediate parent AND the thread's origin post).
+ * Returns the ROOT post's URL, since that's the entry point into the
+ * whole thread.
+ */
+export async function postThreadToBluesky(
+  parts: string[]
+): Promise<{ success: boolean; postUrl?: string; error?: string }> {
+  if (parts.length === 0) {
+    return { success: false, error: 'No content to post' };
+  }
+
+  try {
+    const agent = await getAuthedAgent();
+    const handle = process.env.BLUESKY_IDENTIFIER!.replace('@', '');
+
+    let rootRef: { uri: string; cid: string } | undefined;
+    let parentRef: { uri: string; cid: string } | undefined;
+    let rootPostUrl = '';
+
+    for (let i = 0; i < parts.length; i++) {
+      const record: any = {
+        text: parts[i],
+        createdAt: new Date().toISOString(),
+      };
+
+      if (rootRef && parentRef) {
+        record.reply = { root: rootRef, parent: parentRef };
+      }
+
+      const result = await agent.post(record);
+      const ref = { uri: result.uri, cid: result.cid };
+
+      if (i === 0) {
+        rootRef = ref;
+        const rkey = result.uri.split('/').pop();
+        rootPostUrl = `https://bsky.app/profile/${handle}/post/${rkey}`;
+      }
+      parentRef = ref;
+    }
+
+    return { success: true, postUrl: rootPostUrl };
+  } catch (err) {
+    console.error('Bluesky thread post failed:', err);
     return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
   }
 }
@@ -166,7 +218,7 @@ export async function fetchBlueskyNotifications(): Promise<NormalizedNotificatio
     const handle = n.author.handle;
     return {
       externalId: n.uri,
-      type: n.reason, // 'like' | 'repost' | 'follow' | 'mention' | 'reply' | 'quote'
+      type: n.reason,
       authorHandle: handle,
       authorDisplayName: n.author.displayName ?? handle,
       content: text,
@@ -197,11 +249,7 @@ export interface LinkCard {
 
 export interface NormalizedFeedPost {
   externalId:        string;
-  /** AT Protocol content-hash — required (alongside the uri) for any
-   *  write action: liking, reposting, or replying to this post. */
   cid:                string;
-  /** The author's stable account ID — required to mute/unmute/block,
-   *  which key off identity rather than the (changeable) handle. */
   authorDid:          string;
   authorHandle:       string;
   authorDisplayName:  string;
@@ -210,17 +258,11 @@ export interface NormalizedFeedPost {
   createdAt:          Date;
   images?:            { url: string; alt: string }[];
   video?:             { url: string; alt: string; thumbnail?: string; isHls: boolean };
-  facets?:            any[]; // Bluesky's clickable-span data — see parseBlueskyFacets.ts
+  facets?:            any[];
   replyCount:         number;
   repostCount:        number;
   likeCount:          number;
-  /** Your own like/repost on this post, if any — the AT URI of that
-   *  record, which is what deleteLike()/deleteRepost() needs to undo it.
-   *  Present only when you've actually liked/reposted, per Bluesky. */
   viewer?:            { likeUri?: string; repostUri?: string };
-  /** The root post of this thread — same as {uri, cid} for a top-level
-   *  post, but the ORIGINAL post in the chain for anything nested
-   *  deeper. Replying requires both the immediate parent AND the root. */
   threadRoot:         { uri: string; cid: string };
   replyTo?:           {
     authorHandle: string;
@@ -230,24 +272,8 @@ export interface NormalizedFeedPost {
     video?: { url: string; alt: string; thumbnail?: string; isHls: boolean };
   };
   repostedBy?:        { authorHandle: string; authorDisplayName: string };
-  /**
-   * A quote post — the author added their own text and embedded another
-   * post as a rich card, distinct from a `replyTo` (which is a direct
-   * reply in a thread). Bluesky embed shapes:
-   *   app.bsky.embed.record#view          — quote only
-   *   app.bsky.embed.recordWithMedia#view — quote + the quoting post's
-   *                                          own attached image/video
-   */
   quoted?:            QuotedPost;
-  /** A link preview card — present when this post's own embed is an
-   *  external URL (not an image/video/quote), e.g. a shared article. */
   link?:              LinkCard;
-  /**
-   * Direct replies to THIS post that also appear in the same fetched
-   * batch — grouped here so the UI can render one connected thread
-   * (root above, replies indented below) instead of scattered,
-   * unrelated-looking cards. See groupIntoThreads() below.
-   */
   replies?:           NormalizedFeedPost[];
 }
 
@@ -269,12 +295,6 @@ function extractLinkCard(embed: any): LinkCard | undefined {
   };
 }
 
-/**
- * Reads images/video/quote/link off a top-level-shaped embed
- * (app.bsky.embed.*#view — the shape used on both feed items and
- * getPostThread's PostView). Shared by the main feed mapping AND by
- * fetched thread parents so both produce identical results.
- */
 function extractEmbedMedia(embed: any): MediaBits {
   if (embed?.$type === 'app.bsky.embed.images#view') {
     return { images: embed.images.map((img: any) => ({ url: img.fullsize, alt: img.alt ?? '' })) };
@@ -305,13 +325,6 @@ function extractEmbedMedia(embed: any): MediaBits {
   return {};
 }
 
-/**
- * Unpacks a `app.bsky.embed.record#view.record` (or the `.record.record`
- * inside a `recordWithMedia#view`) into a QuotedPost. Returns undefined
- * for anything that isn't a live, visible post — a deleted quoted post
- * comes back as `app.bsky.embed.record#viewNotFound`, a moderated one as
- * `#viewBlocked` or `#viewDetached`, neither of which has real content.
- */
 function extractQuotedPost(record: any): QuotedPost | undefined {
   if (!record || record.$type !== 'app.bsky.embed.record#viewRecord') return undefined;
 
@@ -319,8 +332,6 @@ function extractQuotedPost(record: any): QuotedPost | undefined {
   const text = (record.value as any)?.text ?? '';
   const rkey = (record.uri as string)?.split('/').pop();
 
-  // A quoted post's own media lives in `record.embeds` (an array),
-  // not `record.embed` — different shape than the top-level post view.
   const nestedEmbed = (record.embeds ?? [])[0];
   let images: { url: string; alt: string }[] | undefined;
   let video: { url: string; alt: string; thumbnail?: string; isHls: boolean } | undefined;
@@ -345,18 +356,11 @@ function extractQuotedPost(record: any): QuotedPost | undefined {
   };
 }
 
-/** Normalizes a raw AT Protocol PostView (same shape for a timeline
- *  item's `post`, a reply's `parent`, or a getPostThread() result) into
- *  a NormalizedFeedPost. Used for feed items AND for parents fetched
- *  separately when they weren't already in the batch. */
 function normalizePostView(post: any): NormalizedFeedPost {
   const handle = post.author.handle;
   const rkey = (post.uri as string).split('/').pop();
   const media = extractEmbedMedia(post.embed as any);
 
-  // A post's own record carries `reply.root` when it's nested deeper
-  // than a direct reply — that's the thread's true origin, needed (along
-  // with this post itself as `parent`) to reply correctly via the API.
   const recordReplyRoot = (post.record as any)?.reply?.root;
   const threadRoot = recordReplyRoot
     ? { uri: recordReplyRoot.uri, cid: recordReplyRoot.cid }
@@ -384,26 +388,6 @@ function normalizePostView(post: any): NormalizedFeedPost {
   };
 }
 
-/**
- * "Following" feed — Bluesky calls this getTimeline() by default (posts
- * from accounts you follow, reverse-chronological). record.text is
- * always plain text per the AT Protocol spec, no HTML stripping needed.
- *
- * Media: images are displayed with author-provided alt text passed
- * through as-is. Video is deliberately NOT embedded here — flagged via
- * hasVideo so the UI can link out to view/play it on Bluesky itself,
- * avoiding autoplay and prefers-reduced-motion complexity entirely.
- *
- * Quote posts (app.bsky.embed.record#view / recordWithMedia#view) are
- * unpacked into `quoted`, including the quoted post's own image/video.
- */
-/**
- * Bluesky's raw getTimeline() API doesn't fully suppress muted accounts
- * in every case (notably: replies within threads can still surface).
- * The official app does its own client-side filtering on top of the API
- * — this replicates that by fetching the mute list and excluding any
- * post whose author (or reply-parent's author) is muted.
- */
 async function getMutedDids(agent: BskyAgent): Promise<Set<string>> {
   const muted = new Set<string>();
   let cursor: string | undefined;
@@ -417,15 +401,6 @@ async function getMutedDids(agent: BskyAgent): Promise<Set<string>> {
 
 type ThreadEntry = { uri: string; parentUri: string | undefined; post: NormalizedFeedPost };
 
-/**
- * Groups replies under their parent so the UI can render one connected
- * thread (root above, replies indented below) instead of scattered,
- * unrelated-looking cards. Works on whatever entries are passed in —
- * both feed items AND any orphaned parents fetched separately via
- * getPostThread() (see fetchBlueskyFollowing) — since by the time this
- * runs, every reply's parent has either come from the batch itself or
- * been fetched and appended as its own entry.
- */
 function groupIntoThreads(entries: ThreadEntry[]): NormalizedFeedPost[] {
   const byUri = new Map(entries.map(e => [e.uri, e]));
   const consumed = new Set<string>();
@@ -439,8 +414,6 @@ function groupIntoThreads(entries: ThreadEntry[]): NormalizedFeedPost[] {
     }
   }
 
-  // A reply that's now visually nested directly under its parent doesn't
-  // need its own duplicate "Replying to..." snippet above its content.
   for (const uri of consumed) {
     delete byUri.get(uri)!.post.replyTo;
   }
@@ -452,13 +425,6 @@ function groupIntoThreads(entries: ThreadEntry[]): NormalizedFeedPost[] {
   return entries.filter(e => !consumed.has(e.uri)).map(e => e.post);
 }
 
-/**
- * Recursively unpacks a getPostThread() node's `replies` array (each of
- * which is itself a threadViewPost with its own nested `replies`) into
- * NormalizedFeedPost.replies chains — used for the on-demand "View full
- * thread" expansion, as opposed to groupIntoThreads() which only ever
- * sees one flat batch of same-page posts.
- */
 function flattenThreadReplies(threadNode: any): NormalizedFeedPost[] {
   const replies = (threadNode.replies ?? []) as any[];
   return replies
@@ -471,12 +437,6 @@ function flattenThreadReplies(threadNode: any): NormalizedFeedPost[] {
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 }
 
-/**
- * Fetches the full reply tree for a single post — used when the user
- * clicks "View full thread" on a post whose replyCount is higher than
- * what's already grouped in from the same feed batch. depth: 10 covers
- * any realistically deep thread; Bluesky's own UI caps around there too.
- */
 export async function fetchBlueskyThread(uri: string): Promise<NormalizedFeedPost[]> {
   try {
     const agent = await getAuthedAgent();
@@ -492,8 +452,6 @@ export async function fetchBlueskyThread(uri: string): Promise<NormalizedFeedPos
 
 export interface FeedPage {
   posts: NormalizedFeedPost[];
-  /** Pass back into the next call to fetch the next page. Undefined
-   *  once Bluesky has no more posts to give. */
   nextCursor?: string;
 }
 
@@ -520,11 +478,6 @@ export async function fetchBlueskyFollowing(cursor?: string): Promise<FeedPage> 
     .map(item => {
       const post = item.post;
 
-      // If this post is a reply, the AT Protocol feed view already
-      // includes the FULL parent post (not just a reference) when the
-      // parent hasn't been deleted/blocked — keep a text+media snippet
-      // as a fallback in case the parent doesn't end up as its own
-      // top-level entry below (see the orphan-fetch step further down).
       const replyParent = (item as any).reply?.parent;
       let replyTo: NormalizedFeedPost['replyTo'];
       if (replyParent && !replyParent.notFound && !replyParent.blocked) {
@@ -538,9 +491,6 @@ export async function fetchBlueskyFollowing(cursor?: string): Promise<FeedPage> 
         };
       }
 
-      // A repost surfaces the reposter's identity via `reason`, while
-      // item.post is always the ORIGINAL post's content — without
-      // checking this, reposts render indistinguishably from originals.
       const reason = (item as any).reason;
       const repostedBy = reason?.$type === 'app.bsky.feed.defs#reasonRepost'
         ? { authorHandle: reason.by.handle, authorDisplayName: reason.by.displayName ?? reason.by.handle }
@@ -557,13 +507,6 @@ export async function fetchBlueskyFollowing(cursor?: string): Promise<FeedPage> 
       };
     });
 
-  // The same underlying post can appear twice in one batch — most
-  // commonly when two different accounts you follow both reposted it,
-  // producing two feed items that share the same post.uri. Left alone,
-  // that becomes two React elements keyed by the same externalId
-  // downstream. Keep just the first occurrence; if a later duplicate was
-  // itself a repost, fold its reposter in so "Reposted by" still credits
-  // both instead of silently dropping one.
   const seenUris = new Map<string, ThreadEntry>();
   for (const entry of entries) {
     const existing = seenUris.get(entry.uri);
@@ -582,11 +525,6 @@ export async function fetchBlueskyFollowing(cursor?: string): Promise<FeedPage> 
   entries.length = 0;
   entries.push(...dedupedEntries);
 
-  // Most replies in a following feed are to accounts you DON'T follow,
-  // so their parent almost never lands in this same 30-post batch —
-  // grouping alone would rarely fire. Fetch those orphaned parents
-  // directly so every reply threads properly, not just the rare case
-  // where both posts happen to co-occur in one page load.
   const inBatch = new Set(entries.map(e => e.uri));
   const orphanParentUris = Array.from(new Set(
     entries
@@ -600,7 +538,7 @@ export async function fetchBlueskyFollowing(cursor?: string): Promise<FeedPage> 
         try {
           const threadRes = await agent.getPostThread({ uri, depth: 0, parentHeight: 0 });
           const thread = threadRes.data.thread as any;
-          if (thread?.$type !== 'app.bsky.feed.defs#threadViewPost') return null; // notFound / blocked
+          if (thread?.$type !== 'app.bsky.feed.defs#threadViewPost') return null;
           return { uri, post: normalizePostView(thread.post) };
         } catch (err) {
           console.error('Failed to fetch parent thread for', uri, err);
@@ -616,4 +554,239 @@ export async function fetchBlueskyFollowing(cursor?: string): Promise<FeedPage> 
   }
 
   return { posts: groupIntoThreads(entries), nextCursor: res.data.cursor };
+}
+
+// ─── Discovery: profiles, author feeds, follow/unfollow ───────────────────
+
+export interface BlueskyProfile {
+  did:                string;
+  handle:             string;
+  displayName:        string;
+  description:        string;
+  avatarUrl?:         string;
+  bannerUrl?:         string;
+  followersCount:     number;
+  followsCount:       number;
+  postsCount:         number;
+  /** The AT URI of YOUR follow record on this account, if you follow
+   *  them — pass straight into unfollowBlueskyAccount() to undo it.
+   *  Undefined means you don't currently follow them. */
+  followingUri?:      string;
+}
+
+export async function getBlueskyProfile(handle: string): Promise<BlueskyProfile | null> {
+  try {
+    const agent = await getAuthedAgent();
+    const res = await agent.getProfile({ actor: handle });
+    const p = res.data;
+    return {
+      did: p.did,
+      handle: p.handle,
+      displayName: p.displayName ?? p.handle,
+      description: p.description ?? '',
+      avatarUrl: p.avatar,
+      bannerUrl: p.banner,
+      followersCount: p.followersCount ?? 0,
+      followsCount: p.followsCount ?? 0,
+      postsCount: p.postsCount ?? 0,
+      followingUri: p.viewer?.following,
+    };
+  } catch (err) {
+    console.error('Bluesky profile fetch failed:', err);
+    return null;
+  }
+}
+
+/**
+ * A single author's own posts (their profile timeline) — same shape as
+ * fetchBlueskyFollowing's result, but scoped to one account via
+ * getAuthorFeed rather than the timeline. Deliberately skips the
+ * mute-filtering and orphan-parent-fetch steps that following feed
+ * does: you're looking at one specific account on purpose, and Bluesky
+ * already includes the immediate reply parent when there is one.
+ */
+export async function fetchBlueskyAuthorFeed(handle: string, cursor?: string): Promise<FeedPage> {
+  const agent = await getAuthedAgent();
+  const res = await agent.getAuthorFeed({ actor: handle, limit: 30, cursor });
+
+  const entries: ThreadEntry[] = res.data.feed.map(item => {
+    const post = item.post;
+    const replyParent = (item as any).reply?.parent;
+
+    let replyTo: NormalizedFeedPost['replyTo'];
+    if (replyParent && !replyParent.notFound && !replyParent.blocked) {
+      const parentMedia = extractEmbedMedia(replyParent.embed as any);
+      replyTo = {
+        authorHandle: replyParent.author.handle,
+        authorDisplayName: replyParent.author.displayName ?? replyParent.author.handle,
+        content: (replyParent.record as any)?.text ?? '',
+        images: parentMedia.images,
+        video: parentMedia.video,
+      };
+    }
+
+    const reason = (item as any).reason;
+    const repostedBy = reason?.$type === 'app.bsky.feed.defs#reasonRepost'
+      ? { authorHandle: reason.by.handle, authorDisplayName: reason.by.displayName ?? reason.by.handle }
+      : undefined;
+
+    const normalized = normalizePostView(post);
+    normalized.replyTo = replyTo;
+    normalized.repostedBy = repostedBy;
+
+    return { uri: post.uri, parentUri: replyParent?.uri as string | undefined, post: normalized };
+  });
+
+  return { posts: groupIntoThreads(entries), nextCursor: res.data.cursor };
+}
+
+export async function followBlueskyAccount(did: string): Promise<ActionResult & { followUri?: string }> {
+  try {
+    const agent = await getAuthedAgent();
+    const result = await agent.follow(did);
+    return { success: true, followUri: result.uri };
+  } catch (err) {
+    console.error('Bluesky follow failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+export async function unfollowBlueskyAccount(followUri: string): Promise<ActionResult> {
+  try {
+    const agent = await getAuthedAgent();
+    await agent.deleteFollow(followUri);
+    return { success: true };
+  } catch (err) {
+    console.error('Bluesky unfollow failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+export interface SavedFeed {
+  /** For the special "Following" entry this is the literal string
+   *  'following' rather than a real AT-URI — fetchBlueskyCustomFeed()
+   *  checks for that sentinel and pulls the timeline instead of a
+   *  feed generator's feed. */
+  uri:          string;
+  displayName:  string;
+}
+
+/**
+ * Your pinned feeds — the same tab bar shown in the Bluesky app itself
+ * (Following, plus whatever custom feeds you've pinned there). Stored as
+ * part of your account preferences, so adding/removing/reordering pins
+ * in the Bluesky app is reflected here automatically — nothing about
+ * feed choice lives in our own database.
+ */
+export async function getBlueskySavedFeeds(): Promise<SavedFeed[]> {
+  try {
+    const agent = await getAuthedAgent();
+    const prefs = await agent.app.bsky.actor.getPreferences();
+
+    const pref = prefs.data.preferences.find(
+      (p: any) => p.$type === 'app.bsky.actor.defs#savedFeedsPrefV2'
+    ) as any;
+
+    if (!pref) return [{ uri: 'following', displayName: 'Following' }];
+
+    const pinned = (pref.items as any[]).filter(item => item.pinned);
+    const feedUris = pinned.filter(item => item.type === 'feed').map(item => item.value);
+
+    const generators = feedUris.length > 0
+      ? (await agent.app.bsky.feed.getFeedGenerators({ feeds: feedUris })).data.feeds
+      : [];
+    const nameByUri = new Map(generators.map(g => [g.uri, g.displayName]));
+
+    return pinned.map(item => {
+      if (item.type === 'timeline') {
+        return { uri: 'following', displayName: 'Following' };
+      }
+      return { uri: item.value, displayName: nameByUri.get(item.value) ?? item.value };
+    });
+  } catch (err) {
+    console.error('Bluesky saved feeds fetch failed:', err);
+    return [{ uri: 'following', displayName: 'Following' }];
+  }
+}
+
+/**
+ * Posts from a specific custom feed (one of your pinned feeds, other
+ * than Following) — same normalized shape as fetchBlueskyFollowing, just
+ * sourced from a feed generator's own algorithm instead of your
+ * timeline. Deliberately skips mute-filtering and orphan-parent-fetch
+ * (see fetchBlueskyFollowing) to keep this fast — a curated feed's
+ * replies less commonly need that treatment than your own timeline does.
+ */
+export async function fetchBlueskyCustomFeed(feedUri: string, cursor?: string): Promise<FeedPage> {
+  const agent = await getAuthedAgent();
+  const res = await agent.app.bsky.feed.getFeed({ feed: feedUri, limit: 30, cursor });
+
+  const entries: ThreadEntry[] = res.data.feed.map(item => {
+    const post = item.post;
+    const replyParent = (item as any).reply?.parent;
+
+    let replyTo: NormalizedFeedPost['replyTo'];
+    if (replyParent && !replyParent.notFound && !replyParent.blocked) {
+      const parentMedia = extractEmbedMedia(replyParent.embed as any);
+      replyTo = {
+        authorHandle: replyParent.author.handle,
+        authorDisplayName: replyParent.author.displayName ?? replyParent.author.handle,
+        content: (replyParent.record as any)?.text ?? '',
+        images: parentMedia.images,
+        video: parentMedia.video,
+      };
+    }
+
+    const reason = (item as any).reason;
+    const repostedBy = reason?.$type === 'app.bsky.feed.defs#reasonRepost'
+      ? { authorHandle: reason.by.handle, authorDisplayName: reason.by.displayName ?? reason.by.handle }
+      : undefined;
+
+    const normalized = normalizePostView(post);
+    normalized.replyTo = replyTo;
+    normalized.repostedBy = repostedBy;
+
+    return { uri: post.uri, parentUri: replyParent?.uri as string | undefined, post: normalized };
+  });
+
+  return { posts: groupIntoThreads(entries), nextCursor: res.data.cursor };
+}
+export interface ActorSearchResult {
+  did:                string;
+  handle:             string;
+  displayName:        string;
+  description:        string;
+  avatarUrl?:         string;
+  /** Same convention as BlueskyProfile.followingUri — the AT URI of your
+   *  follow record if you already follow them, undefined otherwise. */
+  followingUri?:      string;
+}
+
+export async function searchBlueskyActors(query: string, cursor?: string): Promise<{ actors: ActorSearchResult[]; nextCursor?: string }> {
+  const agent = await getAuthedAgent();
+  const res = await agent.app.bsky.actor.searchActors({ term: query, limit: 25, cursor });
+
+  const actors = res.data.actors.map(a => ({
+    did: a.did,
+    handle: a.handle,
+    displayName: a.displayName ?? a.handle,
+    description: a.description ?? '',
+    avatarUrl: a.avatar,
+    followingUri: a.viewer?.following,
+  }));
+
+  return { actors, nextCursor: res.data.cursor };
+}
+
+/**
+ * Full-text post search. Same normalized shape as the feed fetchers, so
+ * results drop straight into PostCard — though counts (likes/reposts/
+ * replies) reflect the post's state at the moment of the search, not
+ * live figures the way a freshly-fetched feed item's would.
+ */
+export async function searchBlueskyPosts(query: string, cursor?: string): Promise<FeedPage> {
+  const agent = await getAuthedAgent();
+  const res = await agent.app.bsky.feed.searchPosts({ q: query, limit: 25, cursor });
+
+  const posts = res.data.posts.map(post => normalizePostView(post));
+  return { posts, nextCursor: res.data.cursor };
 }

@@ -6,6 +6,7 @@ import { Heart, Repeat2, MessageCircle, Loader2, Share2, MoreHorizontal, Copy, V
 import VideoPlayer from '@/components/admin/VideoPlayer';
 import { parseBlueskyFacets } from '@/lib/utils/parseBlueskyFacets';
 import BaseDropdown from '@/components/ui/BaseDropdown';
+import ProfileDialog from '@/components/admin/ProfileDialog';
 
 interface LinkCard {
   uri:                string;
@@ -24,7 +25,7 @@ interface QuotedPost {
   link?:              LinkCard;
 }
 
-interface FeedPost {
+export interface FeedPost {
   externalId:        string;
   cid?:               string; // required for like/repost/reply — Bluesky only, for now
   authorDid?:         string; // required for mute — Bluesky only, for now
@@ -50,7 +51,7 @@ interface FeedPost {
    *  rendered as an indented thread beneath this card. */
   replies?:           FeedPost[];
   replyCount?:        number;
-  repostCount?:       number;
+  repostCount?:        number;
   likeCount?:         number;
   viewer?:            { likeUri?: string; repostUri?: string };
   threadRoot?:        { uri: string; cid: string };
@@ -386,7 +387,6 @@ function InteractionBar({
     if (!canAct || busy) return;
     setBusy('like');
     const wasLiked = !!post.viewer?.likeUri;
-    // Optimistic update — flip immediately, roll back on failure.
     onChange({
       viewer: { ...post.viewer, likeUri: wasLiked ? undefined : 'pending' },
       likeCount: (post.likeCount ?? 0) + (wasLiked ? -1 : 1),
@@ -395,7 +395,7 @@ function InteractionBar({
       ? await actions!.unlike(post.viewer!.likeUri!)
       : await actions!.like(post.externalId, post.cid!);
     if (!result.success) {
-      onChange({ viewer: post.viewer, likeCount: post.likeCount }); // roll back
+      onChange({ viewer: post.viewer, likeCount: post.likeCount });
     } else if (!wasLiked) {
       onChange({ viewer: { ...post.viewer, likeUri: (result as any).likeUri } });
     }
@@ -414,7 +414,7 @@ function InteractionBar({
       ? await actions!.unrepost(post.viewer!.repostUri!)
       : await actions!.repost(post.externalId, post.cid!);
     if (!result.success) {
-      onChange({ viewer: post.viewer, repostCount: post.repostCount }); // roll back
+      onChange({ viewer: post.viewer, repostCount: post.repostCount });
     } else if (!wasReposted) {
       onChange({ viewer: { ...post.viewer, repostUri: (result as any).repostUri } });
     }
@@ -437,7 +437,7 @@ function InteractionBar({
     if (!saveActions || busy) return;
     setBusy('save');
     const wasSaved = !!post.saved;
-    onChange({ saved: !wasSaved }); // optimistic
+    onChange({ saved: !wasSaved });
     const result = wasSaved
       ? await saveActions.unsave(post.externalId)
       : await saveActions.save({
@@ -448,7 +448,7 @@ function InteractionBar({
           url: post.url,
         });
     if (!result.success) {
-      onChange({ saved: wasSaved }); // roll back
+      onChange({ saved: wasSaved });
       setSaveStatus(result.error ?? 'Save failed');
     } else {
       setSaveStatus(wasSaved ? 'Removed' : 'Saved');
@@ -542,12 +542,14 @@ function ThreadReplies({
   actions,
   saveActions,
   depth,
+  onAuthorClick,
 }: {
   replies: FeedPost[];
   platformLabel: string;
   actions?: FeedActions;
   saveActions?: FeedSaveActions;
   depth: number;
+  onAuthorClick?: (handle: string) => void;
 }) {
   const [items, setItems] = useState(replies);
   const indent = Math.min(depth, 4) * 20;
@@ -579,6 +581,7 @@ function ThreadReplies({
             saveActions={saveActions}
             onChange={p => patch(reply.externalId, p)}
             onHide={() => hide(reply.externalId)}
+            onAuthorClick={onAuthorClick}
           />
           {reply.replies && reply.replies.length > 0 && (
             <ThreadReplies
@@ -587,6 +590,7 @@ function ThreadReplies({
               actions={actions}
               saveActions={saveActions}
               depth={depth + 1}
+              onAuthorClick={onAuthorClick}
             />
           )}
         </div>
@@ -667,14 +671,17 @@ function ReplyComposer({
 /** Renders a single post's card content — author line, body, media,
  *  reply-context snippet, quote-embed, and the interaction bar. Reused
  *  for both top-level (root) posts and their nested replies so both
- *  look identical aside from indentation, which the caller controls. */
-function PostCard({
+ *  look identical aside from indentation, which the caller controls.
+ *  Also reused read-only (no actions/saveActions) inside ProfileDialog
+ *  to show an author's own post history. */
+export function PostCard({
   post,
   platformLabel,
   actions,
   saveActions,
   onChange,
   onHide,
+  onAuthorClick,
 }: {
   post: FeedPost;
   platformLabel: string;
@@ -682,15 +689,12 @@ function PostCard({
   saveActions?: FeedSaveActions;
   onChange: (patch: Partial<FeedPost>) => void;
   onHide: () => void;
+  onAuthorClick?: (handle: string) => void;
 }) {
   const [replyOpen, setReplyOpen] = useState(false);
   const [thread, setThread] = useState<FeedPost[] | null>(null);
   const [threadLoading, setThreadLoading] = useState(false);
 
-  // groupIntoThreads() on the server only ever nests replies that landed
-  // in the same feed batch — a post can easily have more replies than
-  // that. Only offer "View full thread" when there's evidence of replies
-  // we haven't already got.
   const alreadyShown = post.replies?.length ?? 0;
   const hasMoreReplies = (post.replyCount ?? 0) > alreadyShown;
 
@@ -750,8 +754,21 @@ function PostCard({
         </div>
       )}
       <p style={{ margin: 0, fontSize: 'var(--as-text-sm)' }}>
-        <strong>{post.authorDisplayName}</strong>{' '}
-        <span style={{ color: 'var(--as-text-muted)' }}>@{post.authorHandle}</span>
+        {onAuthorClick ? (
+          <button
+            type="button"
+            onClick={() => onAuthorClick(post.authorHandle)}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', font: 'inherit', color: 'inherit' }}
+          >
+            <strong>{post.authorDisplayName}</strong>{' '}
+            <span style={{ color: 'var(--as-text-muted)' }}>@{post.authorHandle}</span>
+          </button>
+        ) : (
+          <>
+            <strong>{post.authorDisplayName}</strong>{' '}
+            <span style={{ color: 'var(--as-text-muted)' }}>@{post.authorHandle}</span>
+          </>
+        )}
       </p>
       <p style={{ fontSize: 'var(--as-text-sm)', margin: '4px 0', whiteSpace: 'pre-wrap' }}>
         {platformLabel === 'Bluesky'
@@ -819,7 +836,7 @@ function PostCard({
       )}
 
       {thread && thread.length > 0 && (
-        <ThreadReplies replies={thread} platformLabel={platformLabel} actions={actions} saveActions={saveActions} depth={0} />
+        <ThreadReplies replies={thread} platformLabel={platformLabel} actions={actions} saveActions={saveActions} depth={0} onAuthorClick={onAuthorClick} />
       )}
     </div>
   );
@@ -837,6 +854,7 @@ function ThreadBlock({
   onChangeReply,
   onHideRoot,
   onHideReply,
+  onAuthorClick,
 }: {
   post: FeedPost;
   platformLabel: string;
@@ -846,10 +864,11 @@ function ThreadBlock({
   onChangeReply: (replyExternalId: string, patch: Partial<FeedPost>) => void;
   onHideRoot: () => void;
   onHideReply: (replyExternalId: string) => void;
+  onAuthorClick?: (handle: string) => void;
 }) {
   return (
     <div>
-      <PostCard post={post} platformLabel={platformLabel} actions={actions} saveActions={saveActions} onChange={onChangeRoot} onHide={onHideRoot} />
+      <PostCard post={post} platformLabel={platformLabel} actions={actions} saveActions={saveActions} onChange={onChangeRoot} onHide={onHideRoot} onAuthorClick={onAuthorClick} />
       {post.replies && post.replies.length > 0 && (
         <div style={{
           marginLeft: '28px',
@@ -869,6 +888,7 @@ function ThreadBlock({
               saveActions={saveActions}
               onChange={patch => onChangeReply(reply.externalId, patch)}
               onHide={() => onHideReply(reply.externalId)}
+              onAuthorClick={onAuthorClick}
             />
           ))}
         </div>
@@ -893,6 +913,7 @@ export default function PlatformFeedView({
   fetchFeed,
   actions,
   saveActions,
+  feedName: feedNameProp,
 }: {
   platformLabel: string;
   fetchFeed: (cursor?: string) => Promise<FeedResult>;
@@ -904,14 +925,19 @@ export default function PlatformFeedView({
    *  it can be enabled for any platform once its DB-backed actions are
    *  wired up in the page. */
   saveActions?: FeedSaveActions;
+  /** Overrides the default "Following"/"Home" header label — used when
+   *  the page hosts multiple selectable feeds (Bluesky's pinned custom
+   *  feeds) and wants the header to reflect whichever one is active. */
+  feedName?: string;
 }) {
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [profileHandle, setProfileHandle] = useState<string | null>(null);
 
-  const feedName = platformLabel === 'Bluesky' ? 'Following' : 'Home';
+  const feedName = feedNameProp ?? (platformLabel === 'Bluesky' ? 'Following' : 'Home');
 
   function markSaved(items: FeedPost[], savedIds: Set<string>): FeedPost[] {
     return items.map(p => ({
@@ -942,8 +968,6 @@ export default function PlatformFeedView({
       .then(([result, savedIds]) => {
         const { posts: fetched, nextCursor } = normalizeFeedResult(result);
         const marked = saveActions ? markSaved(fetched, new Set(savedIds)) : fetched;
-        // A post can theoretically show up again across pages (e.g. a
-        // repost surfacing near a page boundary) — keep the earlier copy.
         setPosts(prev => {
           const existingIds = new Set(prev.map(p => p.externalId));
           return [...prev, ...marked.filter(p => !existingIds.has(p.externalId))];
@@ -987,7 +1011,9 @@ export default function PlatformFeedView({
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--as-gap)' }}>
-        <h2 style={{ margin: 0 }}>{platformLabel} — {feedName}</h2>
+        <h2 style={{ margin: 0, fontSize: 'var(--as-text-md)', fontWeight: 600}}>
+          {platformLabel} — {feedName}
+        </h2>
         <button className="btn btn--primary" onClick={load} disabled={loading}>
           {loading ? 'Loading…' : 'Refresh'}
         </button>
@@ -1016,6 +1042,7 @@ export default function PlatformFeedView({
               onChangeReply={(replyId, patch) => patchReply(post.externalId, replyId, patch)}
               onHideRoot={() => hideRoot(post.externalId)}
               onHideReply={replyId => hideReply(post.externalId, replyId)}
+              onAuthorClick={platformLabel === 'Bluesky' ? handle => setProfileHandle(handle) : undefined}
             />
           ))}
 
@@ -1030,6 +1057,10 @@ export default function PlatformFeedView({
             </button>
           )}
         </div>
+      )}
+
+      {profileHandle && (
+        <ProfileDialog handle={profileHandle} onClose={() => setProfileHandle(null)} />
       )}
     </>
   );

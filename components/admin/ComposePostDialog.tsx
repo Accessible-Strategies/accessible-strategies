@@ -11,6 +11,7 @@ type Platform = 'bluesky' | 'mastodon';
 interface ExistingPost {
   id: number;
   content: string;
+  threadParts?: string[] | null;
   scheduledAt: string | Date | null;
   targets?: { platform: string }[];
 }
@@ -40,6 +41,7 @@ function toDateTimeLocal(value: string | Date | null): string {
 export default function ComposePostDialog({ post, initialScheduledAt, onClose, onSaved }: ComposePostDialogProps) {
   const isEditing = !!post;
   const [content, setContent] = useState(post?.content ?? '');
+  const [threadParts, setThreadParts] = useState<string[]>(post?.threadParts ?? []);
   const [scheduledAt, setScheduledAt] = useState(
     toDateTimeLocal(post?.scheduledAt ?? initialScheduledAt ?? null)
   );
@@ -60,11 +62,24 @@ export default function ComposePostDialog({ post, initialScheduledAt, onClose, o
     });
   }
 
+  function addThreadPart() {
+    setThreadParts(prev => [...prev, '']);
+  }
+
+  function updateThreadPart(index: number, value: string) {
+    setThreadParts(prev => prev.map((p, i) => (i === index ? value : p)));
+  }
+
+  function removeThreadPart(index: number) {
+    setThreadParts(prev => prev.filter((_, i) => i !== index));
+  }
+
   const isDirty = isEditing
     ? content !== post!.content
+      || JSON.stringify(threadParts) !== JSON.stringify(post!.threadParts ?? [])
       || toDateTimeLocal(post!.scheduledAt) !== scheduledAt
       || JSON.stringify([...platforms].sort()) !== JSON.stringify((post!.targets?.map(t => t.platform) ?? []).sort())
-    : content.trim().length > 0 || platforms.size > 0;
+    : content.trim().length > 0 || threadParts.some(p => p.trim().length > 0) || platforms.size > 0;
 
   const canSave = content.trim().length > 0;
 
@@ -73,16 +88,19 @@ export default function ComposePostDialog({ post, initialScheduledAt, onClose, o
     setSaving(true);
 
     const scheduledDate = scheduledAt ? new Date(scheduledAt) : undefined;
+    const cleanedThreadParts = threadParts.map(p => p.trim()).filter(p => p.length > 0);
 
     if (isEditing) {
       await updatePostWithTargets(post!.id, {
         content: content.trim(),
+        threadParts: cleanedThreadParts,
         scheduledAt: scheduledDate,
         platforms: [...platforms],
       });
     } else {
       await createPost({
         content: content.trim(),
+        threadParts: cleanedThreadParts,
         scheduledAt: scheduledDate,
         platforms: [...platforms],
       });
@@ -144,7 +162,9 @@ export default function ComposePostDialog({ post, initialScheduledAt, onClose, o
           </p>
         )}
         <div className="form-row">
-          <label className="form-label" htmlFor="post-content">Content</label>
+          <label className="form-label" htmlFor="post-content">
+            {threadParts.length > 0 ? 'Content (post 1 of ' + (threadParts.length + 1) + ')' : 'Content'}
+          </label>
           <textarea
             id="post-content"
             value={content}
@@ -156,6 +176,46 @@ export default function ComposePostDialog({ post, initialScheduledAt, onClose, o
           <p style={{ fontSize: 'var(--as-text-xs)', color: 'var(--as-text-muted)', margin: 0 }}>
             {content.length} characters
           </p>
+        </div>
+
+        {threadParts.map((part, i) => (
+          <div className="form-row" key={i}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <label className="form-label" htmlFor={`post-thread-part-${i}`}>
+                Post {i + 2} of {threadParts.length + 1}
+              </label>
+              <button
+                type="button"
+                className="text-link"
+                onClick={() => removeThreadPart(i)}
+                style={{ marginTop: 0, fontSize: 'var(--as-text-xs)' }}
+              >
+                Remove
+              </button>
+            </div>
+            <textarea
+              id={`post-thread-part-${i}`}
+              value={part}
+              onChange={e => updateThreadPart(i, e.target.value)}
+              rows={4}
+              placeholder="Continue the thread…"
+              className="form-input"
+            />
+            <p style={{ fontSize: 'var(--as-text-xs)', color: 'var(--as-text-muted)', margin: 0 }}>
+              {part.length} characters
+            </p>
+          </div>
+        ))}
+
+        <div className="form-row">
+          <button type="button" className="btn btn--ghost" onClick={addThreadPart}>
+            + Add Post to Thread
+          </button>
+          {threadParts.length > 0 && (
+            <p style={{ fontSize: 'var(--as-text-xs)', color: 'var(--as-text-muted)', margin: '8px 0 0' }}>
+              Posted as a connected thread — each part replies to the one before it, in order, at the scheduled time.
+            </p>
+          )}
         </div>
 
         <div className="form-row">

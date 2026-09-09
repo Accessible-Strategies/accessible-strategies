@@ -32,6 +32,57 @@ export async function postToMastodon(content: string): Promise<{ success: boolea
   }
 }
 
+/**
+ * Posts a thread — an ordered list of statuses, each one set as a reply
+ * to the previous via `in_reply_to_id`. Simpler than Bluesky's
+ * root+parent pair: Mastodon only needs the immediate parent's ID: the
+ * server itself walks the chain back to figure out the whole
+ * conversation. Returns the ROOT post's URL.
+ */
+export async function postThreadToMastodon(
+  parts: string[]
+): Promise<{ success: boolean; postUrl?: string; error?: string }> {
+  if (parts.length === 0) {
+    return { success: false, error: 'No content to post' };
+  }
+
+  try {
+    const instanceUrl = process.env.MASTODON_INSTANCE_URL!;
+    const accessToken  = process.env.MASTODON_ACCESS_TOKEN!;
+
+    let inReplyToId: string | undefined;
+    let rootPostUrl = '';
+
+    for (let i = 0; i < parts.length; i++) {
+      const body: Record<string, string> = { status: parts[i] };
+      if (inReplyToId) body.in_reply_to_id = inReplyToId;
+
+      const res = await fetch(`${instanceUrl}/api/v1/statuses`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        throw new Error(`Mastodon API returned ${res.status}: ${errBody}`);
+      }
+
+      const data = await res.json();
+      if (i === 0) rootPostUrl = data.url;
+      inReplyToId = data.id;
+    }
+
+    return { success: true, postUrl: rootPostUrl };
+  } catch (err) {
+    console.error('Mastodon thread post failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
 export interface NormalizedNotification {
   externalId:        string;
   type:               string;

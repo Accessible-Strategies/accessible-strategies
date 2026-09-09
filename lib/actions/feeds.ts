@@ -118,3 +118,12 @@ export async function listSavedPostIds(platform: string): Promise<string[]> {
     return [];
   }
 }
+export async function getBlueskySavedFeeds() {
+  const { getBlueskySavedFeeds: fetchSavedFeeds } = await import('@/lib/connectors/bluesky');
+  return fetchSavedFeeds();
+}
+
+export async function getBlueskyCustomFeed(feedUri: string, cursor?: string) {
+  const { fetchBlueskyCustomFeed } = await import('@/lib/connectors/bluesky');
+  return fetchBlueskyCustomFeed(feedUri, cursor);
+}
