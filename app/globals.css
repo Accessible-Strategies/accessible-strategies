@@ -139,6 +139,8 @@
   --as-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
   --as-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
   --as-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.6);
+
+  --as-badge-bg: #14162b;
 }
 
 /* =============================================================
@@ -174,6 +176,53 @@
   --as-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
   --as-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.15);
   --as-shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.2);
+
+  --as-badge-bg: #eeecf3;
+}
+
+/* =============================================================
+   HIGH CONTRAST THEME
+   Near-black / near-white (not pure black/white) to reduce halation
+   (glare) for users with certain visual impairments, while still
+   maximizing contrast well past AAA. Yellow accent instead of the
+   brand blue — higher contrast against both the background and the
+   near-white text, and a more conventional "high contrast mode"
+   signal (Windows/browser HC modes lean the same way).
+   ============================================================= */
+[data-theme="hc"] {
+  color-scheme: dark;
+  --as-bg-header:   #050505;
+  --as-bg-main:     #0A0A0A;
+  --as-bg-footer:   #050505;
+
+  --as-bg-section-a: #0A0A0A;
+  --as-bg-section-b: #080808;
+  --as-bg-section-c: #060606;
+
+  --as-text:        #F5F5F5;  /* near-white — body, links, icons */
+  --as-heading:     #FFD400;  /* high-visibility yellow — headings, interactive accent, focus ring */
+
+  --as-btn-bg:      #FFD400;
+  --as-btn-text:    #050505;
+
+  --as-border:      rgba(245, 245, 245, 0.4);
+  --as-text-muted:  rgba(245, 245, 245, 0.8);
+
+  --as-focus-ring:      #FFD400;
+  --as-selection-bg:    #FFD400;
+  --as-selection-text:  #050505;
+
+  --as-overlay: rgba(0, 0, 0, 0.85);
+
+  --as-icon-hover-bg: #050505;
+
+  /* Black shadows are invisible against a near-black background —
+     use a faint light glow instead so raised surfaces still read. */
+  --as-shadow-sm: 0 1px 3px rgba(255, 255, 255, 0.12);
+  --as-shadow-md: 0 2px 8px rgba(255, 255, 255, 0.18);
+  --as-shadow-lg: 0 4px 16px rgba(255, 255, 255, 0.24);
+
+  --as-badge-bg: #171717;
 }
 
 /* =============================================================
@@ -205,9 +254,9 @@
   --as-section-gap: 75px;
   --as-nav-height:  96px;
 
-  --as-radius-sm:   4px;
-  --as-radius-md:   8px;
-  --as-radius-lg:   12px;
+  --as-radius-sm:   5px;
+  --as-radius-md:   10px;
+  --as-radius-lg:   15px;
   --as-radius-full: 9999px;
 
   --as-transition-fast: 150ms ease;
@@ -486,7 +535,7 @@ small     { font-size: var(--as-text-sm); }
   position:       fixed;
   inset:          0;
   z-index:        var(--as-z-backdrop);
-  background-color: rgba(0, 0, 0, 0.4);
+  background-color: var(--as-overlay);
   backdrop-filter:  blur(2px);
   pointer-events: none;
 }
@@ -502,7 +551,7 @@ small     { font-size: var(--as-text-sm); }
   position:        fixed;
   inset:           0;
   z-index:         var(--as-z-modal);
-  background-color: rgba(0, 0, 0, 0.75);
+  background-color: var(--as-overlay);
   backdrop-filter:  blur(4px);
   display:         flex;
   align-items:     center;
@@ -1325,8 +1374,9 @@ small     { font-size: var(--as-text-sm); }
 .kanban-card__platform-badge {
   font-size:        var(--as-text-xs);
   color:            var(--as-heading);
-  background-color: var(--as-border);
+  background-color: 1px solid color-mix(in srgb, var(--as-bg-header) 50%, transparent);
   border-radius:    var(--as-radius-sm);
+  border:           1px solid color-mix(in srgb, var(--as-border) 50%, transparent);
   padding:          1px 6px;
 }
 

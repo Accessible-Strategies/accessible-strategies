@@ -1,11 +1,16 @@
-import { BskyAgent } from '@atproto/api';
+import { BskyAgent, BlobRef } from '@atproto/api';
+import { CID } from 'multiformats/cid';
+import type { StoredBlueskyImage } from '@/lib/db/schema';
 
 /**
  * Bluesky uses "App Passwords" — a simple identifier + app-specific
  * password, no OAuth flow needed for a server-side scheduler like this.
  * Generate one at bsky.app → Settings → App Passwords.
  */
-export async function postToBluesky(content: string): Promise<{ success: boolean; postUrl?: string; error?: string }> {
+export async function postToBluesky(
+  content: string,
+  images?: StoredBlueskyImage[]
+): Promise<{ success: boolean; postUrl?: string; error?: string }> {
   try {
     const agent = new BskyAgent({ service: 'https://bsky.social' });
 
@@ -14,8 +19,12 @@ export async function postToBluesky(content: string): Promise<{ success: boolean
       password: process.env.BLUESKY_APP_PASSWORD!,
     });
 
+    const facets = await buildMentionFacets(agent, content);
+    const embed = buildImageEmbed(images);
     const result = await agent.post({
       text: content,
+      facets: facets.length > 0 ? facets : undefined,
+      embed,
       createdAt: new Date().toISOString(),
     });
 
@@ -39,9 +48,13 @@ export async function postToBluesky(content: string): Promise<{ success: boolean
  * needs both its immediate parent AND the thread's origin post).
  * Returns the ROOT post's URL, since that's the entry point into the
  * whole thread.
+ *
+ * `imagesByPart[i]` (if provided) holds the images for `parts[i]` —
+ * same index alignment as the posts table's `images` column.
  */
 export async function postThreadToBluesky(
-  parts: string[]
+  parts: string[],
+  imagesByPart?: (StoredBlueskyImage[] | undefined)[]
 ): Promise<{ success: boolean; postUrl?: string; error?: string }> {
   if (parts.length === 0) {
     return { success: false, error: 'No content to post' };
@@ -55,9 +68,13 @@ export async function postThreadToBluesky(
     let parentRef: { uri: string; cid: string } | undefined;
     let rootPostUrl = '';
 
-    for (let i = 0; i < parts.length; i++) {
+      for (let i = 0; i < parts.length; i++) {
+      const facets = await buildMentionFacets(agent, parts[i]);
+      const embed = buildImageEmbed(imagesByPart?.[i]);
       const record: any = {
         text: parts[i],
+        facets: facets.length > 0 ? facets : undefined,
+        embed,
         createdAt: new Date().toISOString(),
       };
 
@@ -83,6 +100,105 @@ export async function postThreadToBluesky(
   }
 }
 
+/**
+ * Uploads a single image to Bluesky's blob store — called the moment a
+ * file is picked in the composer, not deferred until the post is saved.
+ * Bluesky's blob storage is content-addressed, so an image attached and
+ * then removed before saving just leaves an unreferenced blob behind,
+ * which is harmless.
+ *
+ * Returns only what's needed to rebuild the blob reference later
+ * (cid/mimeType/size) — alt text and aspect ratio are attached
+ * client-side and stored alongside this in the post record, not here.
+ *
+ * `base64Data` should be the raw base64 payload (no "data:image/..;base64,"
+ * prefix) and under Bluesky's ~1MB-per-image blob limit — the composer
+ * should compress client-side before calling this if a file is larger.
+ */
+export async function uploadBlueskyImage(
+  base64Data: string,
+  mimeType: string
+): Promise<{ success: boolean; image?: { cid: string; mimeType: string; size: number }; error?: string }> {
+  try {
+    const agent = await getAuthedAgent();
+    const bytes = Buffer.from(base64Data, 'base64');
+    const res = await agent.uploadBlob(bytes, { encoding: mimeType });
+    const blob = res.data.blob;
+
+    return {
+      success: true,
+      image: {
+        cid: blob.ref.toString(),
+        mimeType: blob.mimeType,
+        size: blob.size,
+      },
+    };
+  } catch (err) {
+    console.error('Bluesky image upload failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+/**
+ * Rebuilds an app.bsky.embed.images embed from stored image records.
+ * Each image was already uploaded via uploadBlueskyImage at selection
+ * time — this just reconstructs the real BlobRef the AT Protocol needs
+ * (a plain {cid, mimeType, size} object isn't enough; the underlying
+ * DAG-CBOR record needs an actual IPLD link, which is what
+ * `new BlobRef(CID.parse(...), ...)` produces). Caps at 4 images, which
+ * is Bluesky's own limit per post.
+ */
+function buildImageEmbed(images?: StoredBlueskyImage[]) {
+  if (!images || images.length === 0) return undefined;
+
+  return {
+    $type: 'app.bsky.embed.images',
+    images: images.slice(0, 4).map(img => ({
+      image: new BlobRef(CID.parse(img.cid), img.mimeType, img.size),
+      alt: img.alt,
+      aspectRatio: img.aspectRatio,
+    })),
+  };
+}
+
+function utf8Length(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/**
+ * Scans a post's text for "@handle"-shaped mentions and turns each into
+ * a real AT Protocol "facet" — the rich-text annotation that makes a
+ * mention clickable and actually notifies that account, rather than
+ * just looking like a mention. Requires the handle to actually resolve
+ * to a real account (agent.resolveHandle) — anything that doesn't
+ * resolve is left as plain text rather than erroring the whole post.
+ * Byte offsets, not character offsets, per the AT Protocol spec — this
+ * matters the moment the text contains an emoji or other multi-byte
+ * character before the mention.
+ */
+async function buildMentionFacets(agent: BskyAgent, text: string): Promise<any[]> {
+  const regex = /@([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+)/g;
+  const facets: any[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    const handle = match[1];
+    try {
+      const res = await agent.resolveHandle({ handle });
+      const byteStart = utf8Length(text.slice(0, match.index));
+      const byteEnd = byteStart + utf8Length(match[0]);
+      facets.push({
+        index: { byteStart, byteEnd },
+        features: [{ $type: 'app.bsky.richtext.facet#mention', did: res.data.did }],
+      });
+    } catch {
+      // Doesn't resolve to a real account — leave as plain text.
+    }
+  }
+
+  return facets;
+}
+
 async function getAuthedAgent(): Promise<BskyAgent> {
   const agent = new BskyAgent({ service: 'https://bsky.social' });
   await agent.login({
@@ -91,6 +207,15 @@ async function getAuthedAgent(): Promise<BskyAgent> {
   });
   return agent;
 }
+
+// Note: there is deliberately no "fetch a previously-uploaded image back
+// from Bluesky" function here anymore. An uploaded-but-not-yet-published
+// blob isn't reliably retrievable from Bluesky's own servers — it can
+// 500 on com.atproto.sync.getBlob even seconds after uploadBlob()
+// succeeds, because the bytes aren't considered durably committed until
+// the post referencing them is actually published. The composer instead
+// keeps its own preview copy — see StoredBlueskyImage.previewDataUrl in
+// lib/db/schema.ts and ImageAttachments.tsx.
 
 type ActionResult = { success: boolean; error?: string };
 type LikeResult = ActionResult & { likeUri?: string };
@@ -146,17 +271,23 @@ export async function unrepostBlueskyPost(repostUri: string): Promise<ActionResu
  * `parent` when replying to a top-level post); `parent` is the specific
  * post being replied to. Both come straight from a NormalizedFeedPost's
  * `threadRoot` and `{externalId, cid}` — see PlatformFeedView's reply
- * composer.
+ * composer. `images`, like elsewhere, are already-uploaded blob
+ * references built via uploadBlueskyImage.
  */
 export async function replyToBlueskyPost(
   text: string,
   root: { uri: string; cid: string },
-  parent: { uri: string; cid: string }
+  parent: { uri: string; cid: string },
+  images?: StoredBlueskyImage[]
 ): Promise<ReplyResult> {
   try {
     const agent = await getAuthedAgent();
+    const facets = await buildMentionFacets(agent, text);
+    const embed = buildImageEmbed(images);
     const result = await agent.post({
       text,
+      facets: facets.length > 0 ? facets : undefined,
+      embed,
       reply: { root, parent },
       createdAt: new Date().toISOString(),
     });

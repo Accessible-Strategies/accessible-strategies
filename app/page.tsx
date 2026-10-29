@@ -4,7 +4,7 @@ import { BlueskyIcon, MastodonIcon } from '@/components/icons/Icons';
 export const metadata: Metadata = {
   title: 'Accessible Strategies — Coming Soon',
   description:
-    "Accessible Strategies is a Digital Accessibility Consultancy launching November 2, 2026. Follow along on Bluesky or Mastodon in the meantime.",
+    "Accessible Strategies is a Digital Accessibility Consultancy launching sometime before 2027. Follow along on Bluesky or Mastodon in the meantime.",
 };
 
 // TODO: replace with your real profile URLs
@@ -38,7 +38,7 @@ export default function ComingSoonPage() {
           </p>
 
           <p>
-            The site isn&rsquo;t finished yet. I&rsquo;m hoping to launch it by <strong>November 2nd</strong>,
+            The site isn&rsquo;t finished yet. I&rsquo;m hoping to launch it by January 2027,
             so please check back then.
           </p>
 

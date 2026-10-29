@@ -33,6 +33,9 @@ interface BaseDropdownProps {
  *   work once portalled).
  * - Height-safe: capped to remaining viewport space below the trigger,
  *   with its own scroll, so it can never run off-screen.
+ * - Registers with the shared DropdownContext stack (not just a raw
+ *   count) so Focus Assistance can tell whether this dropdown opened on
+ *   top of an already-open modal, not just that "something" is open.
  *
  * Usage — same API shape as the original:
  *   <BaseDropdown trigger={(open) => <span>Click me</span>}>
@@ -45,6 +48,7 @@ export default function BaseDropdown({ trigger, children, minWidth = '160px', la
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef    = useRef<HTMLDivElement>(null);
   const { register, unregister } = useDropdown();
+  const layerIdRef = useRef<string | null>(null);
 
   function openMenu() {
     if (triggerRef.current) {
@@ -64,8 +68,11 @@ export default function BaseDropdown({ trigger, children, minWidth = '160px', la
   // bug elsewhere in this codebase. One source of truth for this state.
   useEffect(() => {
     if (!open) return;
-    register();
-    return () => unregister();
+    layerIdRef.current = register('dropdown');
+    return () => {
+      if (layerIdRef.current) unregister(layerIdRef.current);
+      layerIdRef.current = null;
+    };
   }, [open, register, unregister]);
 
   useEscapeKey(close, open);

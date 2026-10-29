@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDropdown } from '@/lib/DropdownContext';
 import { useEscapeKey } from '@/lib/hooks/useEscapeKey';
+import { useSettings } from '@/lib/SettingsContext';
 
 interface Anchor {
   top:   number;
@@ -42,9 +43,11 @@ export default function Modal({
   maximizable = false,
   persistKey,
 }: ModalProps) {
-  const { register, unregister } = useDropdown();
+  const { register, unregister, isCovered } = useDropdown();
+  const { focusAssistance } = useSettings();
   const panelRef         = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const layerIdRef       = useRef<string | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
 
@@ -70,11 +73,21 @@ export default function Modal({
 
   useEscapeKey(handleDismissAttempt, !closeDisabled);
 
+  // Register with the shared dropdown/dialog stack for every modal — not
+  // just anchored ones. This is what lets `isCovered` below tell us when
+  // something (like a mention autocomplete dropdown) has opened on top of
+  // this modal, so we can dim our own content instead of relying on
+  // Focus Assistance's page-level backdrop, which can never render above
+  // an already-open modal (it sits at a lower z-index by design).
   useEffect(() => {
-    if (!anchor) return;
-    register();
-    return () => unregister();
-  }, [anchor, register, unregister]);
+    layerIdRef.current = register('modal');
+    return () => {
+      if (layerIdRef.current) unregister(layerIdRef.current);
+      layerIdRef.current = null;
+    };
+  }, [register, unregister]);
+
+  const coveredByNestedLayer = focusAssistance && !!layerIdRef.current && isCovered(layerIdRef.current);
 
   useEffect(() => {
     if (!anchor) return;
@@ -116,7 +129,7 @@ export default function Modal({
   const effectiveMaxWidth = maximized ? '98vw' : maxWidth;
   const displayTitle   = confirmingDiscard ? 'Discard Unsaved Changes?' : title;
   const displayMessage = confirmDiscardMessage
-    ?? 'You have unsaved changes. Closing now will discard them, and this can\u2019t be undone.';
+    ?? 'You have unsaved changes. Closing now will discard them, and this can’t be undone.';
 
   const panel = (
     <div
@@ -133,6 +146,10 @@ export default function Modal({
       } : {
         maxWidth:  effectiveMaxWidth,
         maxHeight: maximized ? '96vh' : '90vh',
+        // Needed as a containing block for the nested-layer dimming
+        // overlay below (position: absolute; inset: 0). Anchored modals
+        // already get this for free from .modal-panel's position: fixed.
+        position:  'relative',
       }}
     >
       <div className={anchor ? 'modal-panel__header' : 'modal__header'}>
@@ -179,6 +196,26 @@ export default function Modal({
         <div className="modal__footer">
           {footer}
         </div>
+      )}
+
+      {/* Dims this modal's own content when something (e.g. a mention
+          autocomplete dropdown) has opened on top of it. Focus Assistance's
+          page-level backdrop can't reach here — it renders below the
+          modal's z-index by design — so each modal handles this itself,
+          scoped to its own panel, via the shared layer stack. */}
+      {coveredByNestedLayer && (
+        <div
+          aria-hidden="true"
+          style={{
+            position:       'absolute',
+            inset:          0,
+            zIndex:         10,
+            background:     'var(--as-overlay)',
+            backdropFilter: 'blur(2px)',
+            borderRadius:   'inherit',
+            pointerEvents:  'none',
+          }}
+        />
       )}
     </div>
   );

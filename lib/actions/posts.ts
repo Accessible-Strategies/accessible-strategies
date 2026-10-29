@@ -2,18 +2,32 @@
 
 import { db } from '@/lib/db';
 import { posts, postTargets } from '@/lib/db/schema';
+import type { StoredBlueskyImage } from '@/lib/db/schema';
 import { eq } from 'drizzle-orm';
+
+/**
+ * Uploads one image to Bluesky's blob store and returns just enough to
+ * rebuild the reference later (cid/mimeType/size). Called by the
+ * composer the moment a file is picked, not deferred until save — see
+ * uploadBlueskyImage's own doc comment for why that's safe.
+ */
+export async function uploadPostImageAction(base64Data: string, mimeType: string) {
+  const { uploadBlueskyImage } = await import('@/lib/connectors/bluesky');
+  return uploadBlueskyImage(base64Data, mimeType);
+}
 
 export async function createPost(data: {
   content: string;
   threadParts?: string[];
-  scheduledAt?: Date;
+  images?: StoredBlueskyImage[][];
+  scheduledAt?: Date | null;
   platforms: ('bluesky' | 'mastodon')[];
 }) {
   const [post] = await db.insert(posts).values({
     content: data.content,
     threadParts: data.threadParts && data.threadParts.length > 0 ? data.threadParts : null,
-    scheduledAt: data.scheduledAt,
+    images: hasAnyImages(data.images) ? data.images : null,
+    scheduledAt: data.scheduledAt ?? null,
     status: data.scheduledAt ? 'scheduled' : 'draft',
   }).returning();
 
@@ -51,14 +65,21 @@ export async function updatePost(id: number, data: { content?: string; scheduled
 export async function updatePostWithTargets(id: number, data: {
   content: string;
   threadParts?: string[];
-  scheduledAt?: Date;
+  images?: StoredBlueskyImage[][];
+  scheduledAt?: Date | null;
   platforms: ('bluesky' | 'mastodon')[];
 }) {
   const [updated] = await db.update(posts)
     .set({
       content: data.content,
       threadParts: data.threadParts && data.threadParts.length > 0 ? data.threadParts : null,
-      scheduledAt: data.scheduledAt,
+      images: hasAnyImages(data.images) ? data.images : null,
+      // Drizzle treats `undefined` as "leave this column alone", not
+      // "clear it" — passing that straight through here was why clearing
+      // the schedule flipped status back to draft but left the old
+      // scheduledAt sitting in the row. Only an explicit null actually
+      // clears a nullable column.
+      scheduledAt: data.scheduledAt ?? null,
       status: data.scheduledAt ? 'scheduled' : 'draft',
       updatedAt: new Date(),
     })
@@ -76,6 +97,10 @@ export async function updatePostWithTargets(id: number, data: {
   return updated;
 }
 
+function hasAnyImages(images?: StoredBlueskyImage[][]): images is StoredBlueskyImage[][] {
+  return !!images && images.some(part => part && part.length > 0);
+}
+
 export async function deletePost(id: number) {
   await db.delete(posts).where(eq(posts.id, id));
 }
@@ -89,6 +114,9 @@ export async function deletePost(id: number) {
  *
  * If the post has threadParts, posts a whole thread (content followed by
  * each part, each replying to the previous) instead of a single post.
+ * `images[0]` (if any) goes with `content`; `images[i + 1]` goes with
+ * `threadParts[i]` — same index alignment used throughout. Bluesky-only:
+ * Mastodon's connector calls are unchanged and never see images.
  */
 export async function publishPostNow(postId: number) {
   const { postToBluesky, postThreadToBluesky }   = await import('@/lib/connectors/bluesky');
@@ -104,6 +132,7 @@ export async function publishPostNow(postId: number) {
   const threadParts = (post.threadParts as string[] | null) ?? [];
   const isThread = threadParts.length > 0;
   const allParts = [post.content, ...threadParts];
+  const imagesByPart = (post.images as StoredBlueskyImage[][] | null) ?? [];
 
   let anyFailed = false;
 
@@ -111,7 +140,9 @@ export async function publishPostNow(postId: number) {
     let result: { success: boolean; postUrl?: string; error?: string };
 
     if (target.platform === 'bluesky') {
-      result = isThread ? await postThreadToBluesky(allParts) : await postToBluesky(post.content);
+      result = isThread
+        ? await postThreadToBluesky(allParts, imagesByPart)
+        : await postToBluesky(post.content, imagesByPart[0]);
     } else if (target.platform === 'mastodon') {
       result = isThread ? await postThreadToMastodon(allParts) : await postToMastodon(post.content);
     } else {

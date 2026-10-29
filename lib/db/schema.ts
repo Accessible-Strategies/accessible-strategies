@@ -1,6 +1,26 @@
 import { pgTable, serial, text, timestamp, varchar, boolean, integer, jsonb } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
+// A single image attached to a post (or one of its thread parts). It's
+// already been uploaded to Bluesky's blob store at selection time in the
+// composer — see uploadBlueskyImage in lib/connectors/bluesky.ts — so this
+// only needs to hold what's necessary to rebuild that blob reference
+// (cid + mimeType + size) plus the alt text, rather than the full image
+// bytes. Bluesky-only for now.
+export interface StoredBlueskyImage {
+  cid:             string;
+  mimeType:        string;
+  size:            number;
+  alt:             string;
+  aspectRatio?:    { width: number; height: number };
+  // A downscaled preview copy (see ImageAttachments.tsx), stored here
+  // rather than re-fetched from Bluesky — an uploaded-but-unpublished
+  // image's blob isn't reliably retrievable from Bluesky's own servers
+  // until the post referencing it is actually published, so this is the
+  // only dependable way to show a preview of a saved draft's images.
+  previewDataUrl?: string;
+}
+
 // A single composed post — one row regardless of how many platforms it targets
 export const posts = pgTable('posts', {
   id:           serial('id').primaryKey(),
@@ -10,6 +30,10 @@ export const posts = pgTable('posts', {
   // before it — see postThreadToBluesky/postThreadToMastodon. Null or
   // an empty array means this is just a regular single post.
   threadParts:  jsonb('thread_parts').$type<string[]>(),
+  // Images per post-part — images[0] is the main content's images,
+  // images[1] is threadParts[0]'s, and so on. Null/omitted means no
+  // images anywhere in the post. Bluesky-only for now.
+  images:       jsonb('images').$type<StoredBlueskyImage[][]>(),
   scheduledAt:  timestamp('scheduled_at', { withTimezone: true }),
   status:       varchar('status', { length: 20 }).notNull().default('draft'), // draft | scheduled | posted | failed
   createdAt:    timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
